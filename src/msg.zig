@@ -13,7 +13,8 @@ pub const header = struct {
     nscount: u16 = 0,
     arcount: u16 = 0,
 
-    pub fn fromBytes(buf: []u8, h: *header) void {
+    pub fn fromBytes(h: *header, buf: []u8) void {
+        // TODO: Use readIntForeign to remove bit manipulation?
         h.id = (@as(u16, buf[0]) << 8) + buf[1];
         h.flags = (@as(u16, buf[2]) << 8) + buf[3];
         h.qdcount = (@as(u16, buf[4]) << 8) + buf[5];
@@ -25,6 +26,8 @@ pub const header = struct {
     pub fn toBytes(self: *const header, output: []u8) u32 {
         std.debug.assert(output.len >= 12);
         comptime var i: u32 = 0;
+
+        // TODO: use comptime to cleanup this?
         std.mem.writeIntForeign(u16, output[i..(i + 2)], self.id);
         i += 2;
         std.mem.writeIntForeign(u16, output[i..(i + 2)], self.flags);
@@ -45,7 +48,7 @@ test "header from bytes" {
     var bytes = [_]u8{ 0, 1, 0, 0, 0, 1, 0, 1, 0, 1, 1, 1 };
     var h = header{ .id = 0, .flags = 0, .qdcount = 0, .ancount = 0, .nscount = 0, .arcount = 0 };
 
-    header.fromBytes(bytes[0..], &h);
+    h.fromBytes(bytes[0..]);
     try std.testing.expectEqual(@as(u16, 1), h.id);
     try std.testing.expectEqual(@as(u16, 0), h.flags);
     try std.testing.expectEqual(@as(u16, 1), h.qdcount);
@@ -73,6 +76,20 @@ pub const question = struct {
     qname: []u8,
     qtype: u16,
     qclass: u16,
+
+    pub fn fromBytes(self: *question, input: []const u8, allocator: std.mem.Allocator) !u32 {
+        var name: [:0]u8 = try allocator.allocSentinel(u8, 256, 0);
+        var offset: u32 = 0;
+        var parse_out = parse_name(input, offset, name);
+
+        self.qname = name[0..(parse_out.output_written)];
+        offset += parse_out.offset;
+
+        self.qtype = slice_to_int(u16, input[0..], &offset);
+        self.qclass = slice_to_int(u16, input[0..], &offset);
+
+        return offset;
+    }
 
     pub fn toBytes(self: *const question, output: []u8) u32 {
         std.debug.assert((self.qname.len + 4) <= output.len);
@@ -104,6 +121,22 @@ pub const question = struct {
     }
 };
 
+test "question from bytes" {
+    var input = [_]u8{ 3, 'e', 'a', 'a', 2, 'x', 'y', 0, 0, 1, 1, 1 };
+    var q = question{ .qname = "", .qtype = 0, .qclass = 0 };
+
+    var mem_buffer: [1000]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&mem_buffer);
+    const allocator = fba.allocator();
+
+    var out = q.fromBytes(input[0..], allocator);
+
+    try std.testing.expectEqual(@as(u32, 12), out catch unreachable);
+    try std.testing.expectEqualStrings("eaa.xy", q.qname);
+    try std.testing.expectEqual(@as(u32, 1), q.qtype);
+    try std.testing.expectEqual(@as(u32, 257), q.qclass);
+}
+
 test "question to bytes" {
     var b = [_]u8{0} ** 10;
     var name = [_]u8{ 'a', 'b', '.', 'd' };
@@ -120,7 +153,7 @@ pub const message = struct {
     question: question,
 
     pub fn forDomain(domain: []u8) message {
-        const h = header{ .id = 33432, .flags = 1 << 8, .qdcount = 1 };
+        const h = header{ .id = 1, .flags = 1 << 8, .qdcount = 1 };
         const q = question{ .qname = domain, .qtype = 1, .qclass = 1 };
 
         const m = message{ .header = h, .question = q };
@@ -145,3 +178,156 @@ pub const message = struct {
         return 2 + msg_len;
     }
 };
+
+// TODO: Add basic tests for message
+
+pub const rr_type = enum(u16) {
+    A,
+    NS,
+    CNAME = 5,
+    SOA,
+    PTR = 12,
+    HINFO,
+    MINFO,
+    MX,
+    TXT,
+};
+
+pub const resource_record = struct {
+    name: []u8 = "",
+    type: rr_type = rr_type.A,
+    class: u16 = 0,
+    ttl: u32 = 0,
+    rdlength: u16 = 0,
+    rdata: []const u8 = "",
+
+    // RR can have message compression, so we will need to pass full input buffer
+    // Needs allocator?
+    pub fn fromBytes(self: *resource_record, full_msg_bytes: []const u8, input_offset: u32, allocator: std.mem.Allocator) !u32 {
+        // Domain name cannot be more than 255 octets
+        var name = try allocator.alloc(u8, 256);
+        var offset = input_offset;
+
+        const name_out = parse_name(full_msg_bytes, offset, name);
+        self.name = name[0..name_out.output_written];
+
+        offset += name_out.offset;
+
+        self.type = @intToEnum(rr_type, slice_to_int(u16, full_msg_bytes[0..], &offset));
+        self.class = slice_to_int(u16, full_msg_bytes[0..], &offset);
+        self.ttl = slice_to_int(u32, full_msg_bytes[0..], &offset);
+        self.rdlength = slice_to_int(u16, full_msg_bytes[0..], &offset);
+
+        self.rdata = full_msg_bytes[offset..(offset + self.rdlength)];
+        offset += self.rdlength;
+
+        return offset;
+    }
+};
+
+test "rr from bytes" {
+    const msg_bytes = [_]u8{ 3, 'a', 'b', 'c', 2, 'd', 'e', 0, 0, 1, 1, 1, 0, 0, 0, 2, 0, 3, 0, 0, 0 };
+    var output = [_]u8{0} ** 10;
+    _ = output;
+    var mem_buffer: [1000]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&mem_buffer);
+    const allocator = fba.allocator();
+
+    var rr = resource_record{};
+    const out = rr.fromBytes(msg_bytes[0..], 0, allocator);
+
+    try std.testing.expectEqual(@as(u32, 21), out catch unreachable);
+    try std.testing.expectEqual(rr_type.NS, rr.type);
+    try std.testing.expectEqual(@as(u16, 257), rr.class);
+    try std.testing.expectEqual(@as(u32, 2), rr.ttl);
+    try std.testing.expectEqual(@as(u16, 3), rr.rdlength);
+}
+
+const parse_name_out = struct { offset: u32, output_written: u32 };
+
+fn parse_name(full_msg_bytes: []const u8, input_offset: u32, output: []u8) parse_name_out {
+    var o_id: u32 = 0;
+    var offset = input_offset;
+    var offset_increase: u32 = 0;
+    const compression_flag: u16 = 0b11 << 6;
+    var compression_encountered: bool = false;
+    var len: u8 = undefined;
+
+    while (true) {
+        len = full_msg_bytes[offset];
+        offset += 1;
+        if (!compression_encountered)
+            offset_increase += 1;
+
+        if (len == 0) break;
+        if (o_id >= 256) {
+            std.debug.print("Domain name cannot be more that 255 chars\n", .{});
+            break;
+        }
+
+        if ((len & compression_flag) == compression_flag) {
+            // Compressed msg offset is two octet, while normal label has one octet length
+            var compressed_len: u16 = len;
+            compressed_len = (compressed_len << 8) + full_msg_bytes[offset];
+            offset += 1;
+            offset_increase += 1;
+
+            const msg_offset = compressed_len & (~(compression_flag << 8));
+            len = full_msg_bytes[msg_offset];
+            offset = msg_offset + 1;
+            compression_encountered = true;
+        }
+
+        @memcpy(output[o_id..(o_id + len)], full_msg_bytes[offset..(offset + len)]);
+        o_id += len;
+        offset += len;
+
+        if (!compression_encountered)
+            offset_increase += len;
+
+        // Add a . after each label in output
+        output[o_id] = '.';
+        o_id += 1;
+    }
+
+    // Add ending null char, remove last '.' char
+    output[o_id] = 0;
+    o_id -= 1;
+
+    return parse_name_out{ .offset = offset_increase, .output_written = o_id };
+}
+
+test "parse_name no compression" {
+    const msg_bytes = [_]u8{ 3, 'a', 'b', 'c', 2, 'd', 'e', 0 };
+    var output = [_]u8{0} ** 10;
+
+    const out = parse_name(msg_bytes[0..], 0, output[0..]);
+
+    try std.testing.expectEqual(@as(u32, 8), out.offset);
+    try std.testing.expectEqual(@as(u32, 6), out.output_written);
+    try std.testing.expectEqualStrings("abc.de", output[0..(out.output_written)]);
+}
+
+test "parse_name compression" {
+    const msg_bytes = [_]u8{ 3, 'a', 'b', 'c', 2, 'd', 'e', 0, 0, 1, 3, 'e', 'a', 'a', 0b11000000, 0, 'r', 'a', 'n', 'd' };
+    var output = [_]u8{0} ** 20;
+    const offset = 10;
+
+    const out = parse_name(msg_bytes[0..], offset, output[0..]);
+
+    try std.testing.expectEqual(@as(u32, 6), out.offset);
+    try std.testing.expectEqual(@as(u32, 10), out.output_written);
+    try std.testing.expectEqualStrings("eaa.abc.de", output[0..(out.output_written)]);
+}
+
+fn slice_to_int(comptime T: type, slice: []const u8, input_offset: *u32) T {
+    const it: u8 = @typeInfo(T).Int.bits / 8;
+    var value: T = slice[input_offset.*];
+    input_offset.* += 1;
+    inline for (0..it - 1) |_| {
+        value = (value << 8) + slice[input_offset.*];
+        input_offset.* += 1;
+    }
+
+    return value;
+}

@@ -39,9 +39,14 @@ pub fn main() !void {
     std.debug.print("len: {d}\t\tsent: {d}\trecv: {d}\n\n", .{ len, sent, recv });
 
     for (0..recv) |i| {
-        std.debug.print("{x:0>2}", .{buf[i]});
+        std.debug.print("{x:0>2} ", .{buf[i]});
     }
     std.debug.print("\n\n", .{});
+
+    var resp_h: msg.header = msg.header{};
+    const resp_content = buf[2..recv];
+    resp_h.fromBytes(resp_content[0..]);
+    std.debug.print("response header: {}, flags: {b:0>16}\n", .{ resp_h, resp_h.flags });
 
     // stdout is for the actual output of your application, for example if you
     // are implementing gzip, then only the compressed bytes should be sent to
