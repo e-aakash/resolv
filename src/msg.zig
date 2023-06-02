@@ -13,7 +13,7 @@ pub const header = struct {
     nscount: u16 = 0,
     arcount: u16 = 0,
 
-    pub fn fromBytes(h: *header, buf: []u8) void {
+    pub fn fromBytes(h: *header, buf: []const u8) u32 {
         // TODO: Use readIntForeign to remove bit manipulation?
         h.id = (@as(u16, buf[0]) << 8) + buf[1];
         h.flags = (@as(u16, buf[2]) << 8) + buf[3];
@@ -21,6 +21,8 @@ pub const header = struct {
         h.ancount = (@as(u16, buf[6]) << 8) + buf[7];
         h.nscount = (@as(u16, buf[8]) << 8) + buf[9];
         h.arcount = (@as(u16, buf[10]) << 8) + buf[11];
+
+        return 12;
     }
 
     pub fn toBytes(self: *const header, output: []u8) u32 {
@@ -48,7 +50,7 @@ test "header from bytes" {
     var bytes = [_]u8{ 0, 1, 0, 0, 0, 1, 0, 1, 0, 1, 1, 1 };
     var h = header{ .id = 0, .flags = 0, .qdcount = 0, .ancount = 0, .nscount = 0, .arcount = 0 };
 
-    h.fromBytes(bytes[0..]);
+    _ = h.fromBytes(bytes[0..]);
     try std.testing.expectEqual(@as(u16, 1), h.id);
     try std.testing.expectEqual(@as(u16, 0), h.flags);
     try std.testing.expectEqual(@as(u16, 1), h.qdcount);
@@ -73,9 +75,9 @@ test "header to bytes" {
 }
 
 pub const question = struct {
-    qname: []u8,
-    qtype: u16,
-    qclass: u16,
+    qname: []u8 = "",
+    qtype: u16 = 0,
+    qclass: u16 = 0,
 
     pub fn fromBytes(self: *question, input: []const u8, allocator: std.mem.Allocator) !u32 {
         var name: [:0]u8 = try allocator.allocSentinel(u8, 256, 0);
@@ -150,13 +152,18 @@ test "question to bytes" {
 
 pub const message = struct {
     header: header,
-    question: question,
+    question: []question = &[_]question{},
+    answers: []resource_record = &[_]resource_record{},
+    authority: []resource_record = &[_]resource_record{},
+    additional: []resource_record = &[_]resource_record{},
 
-    pub fn forDomain(domain: []u8) message {
+    pub fn forDomain(domain: []u8, allocator: std.mem.Allocator) !message {
         const h = header{ .id = 1, .flags = 1 << 8, .qdcount = 1 };
         const q = question{ .qname = domain, .qtype = 1, .qclass = 1 };
 
-        const m = message{ .header = h, .question = q };
+        var qs = try allocator.alloc(question, 1);
+        qs[0] = q;
+        const m = message{ .header = h, .question = qs[0..] };
         return m;
     }
 
@@ -170,27 +177,69 @@ pub const message = struct {
     // TCP needs 2 bytes at start of the buffer (https://datatracker.ietf.org/doc/html/rfc1035#section-4.2.2)
     pub fn toBytesTCP(self: *const message, buffer: []u8) u32 {
         const header_len = self.header.toBytes(buffer[2..]);
-        const question_len = self.question.toBytes(buffer[(2 + header_len)..]);
+        // FIXME: Update this to use allow variable questions
+        const question_len = self.question[0].toBytes(buffer[(2 + header_len)..]);
 
         const msg_len = header_len + question_len;
         buffer[0] = @truncate(u8, msg_len >> 8);
         buffer[1] = @truncate(u8, msg_len & 0b11111111);
         return 2 + msg_len;
     }
+
+    pub fn fromBytes(self: *message, msg: []const u8, allocator: std.mem.Allocator) !u32 {
+        var offset: u32 = 0;
+
+        var h = header{};
+        offset += h.fromBytes(msg[0..]);
+        self.header = h;
+
+        if (self.header.ancount != 0) {
+            self.question = try allocator.alloc(question, self.header.qdcount);
+            for (0..(h.qdcount)) |i| {
+                offset += try self.question[i].fromBytes(msg[offset..], allocator);
+            }
+        }
+
+        if (self.header.ancount != 0) {
+            self.answers = try allocator.alloc(resource_record, self.header.ancount);
+            for (0..(h.ancount)) |i| {
+                offset += try self.answers[i].fromBytes(msg, offset, allocator);
+            }
+        }
+
+        if (self.header.nscount != 0) {
+            self.authority = try allocator.alloc(resource_record, self.header.nscount);
+            for (0..(h.nscount)) |i| {
+                offset += try self.answers[i].fromBytes(msg, offset, allocator);
+            }
+        }
+
+        if (self.header.arcount != 0) {
+            self.answers = try allocator.alloc(resource_record, self.header.arcount);
+            for (0..(h.arcount)) |i| {
+                offset += try self.answers[i].fromBytes(msg, offset, allocator);
+            }
+        }
+
+        return offset;
+    }
 };
 
 // TODO: Add basic tests for message
 
 pub const rr_type = enum(u16) {
-    A,
+    A = 1,
     NS,
     CNAME = 5,
     SOA,
     PTR = 12,
-    HINFO,
-    MINFO,
     MX,
     TXT,
+};
+
+pub const rdata = union {
+    raw: []const u8,
+    ipv4: std.net.Ip4Address,
 };
 
 pub const resource_record = struct {
@@ -199,7 +248,7 @@ pub const resource_record = struct {
     class: u16 = 0,
     ttl: u32 = 0,
     rdlength: u16 = 0,
-    rdata: []const u8 = "",
+    rdata: rdata = rdata{ .raw = "" },
 
     // RR can have message compression, so we will need to pass full input buffer
     // Needs allocator?
@@ -218,10 +267,26 @@ pub const resource_record = struct {
         self.ttl = slice_to_int(u32, full_msg_bytes[0..], &offset);
         self.rdlength = slice_to_int(u16, full_msg_bytes[0..], &offset);
 
-        self.rdata = full_msg_bytes[offset..(offset + self.rdlength)];
+        self.rdata = rdata{ .raw = full_msg_bytes[offset..(offset + self.rdlength)] };
+
+        switch (self.type) {
+            .A => {
+                self.rdata = rdata{
+                    .ipv4 = std.net.Ip4Address.init(
+                        [4]u8{ full_msg_bytes[offset + 0], full_msg_bytes[offset + 1], full_msg_bytes[offset + 2], full_msg_bytes[offset + 3] },
+                        0,
+                    ),
+                };
+            },
+            else => {
+                self.rdata = rdata{ .raw = full_msg_bytes[offset..(offset + self.rdlength)] };
+            },
+        }
+
         offset += self.rdlength;
 
-        return offset;
+        // Return only the change in offset, not the absolute offset
+        return offset - input_offset;
     }
 };
 
@@ -237,7 +302,7 @@ test "rr from bytes" {
     const out = rr.fromBytes(msg_bytes[0..], 0, allocator);
 
     try std.testing.expectEqual(@as(u32, 21), out catch unreachable);
-    try std.testing.expectEqual(rr_type.NS, rr.type);
+    try std.testing.expectEqual(rr_type.A, rr.type);
     try std.testing.expectEqual(@as(u16, 257), rr.class);
     try std.testing.expectEqual(@as(u32, 2), rr.ttl);
     try std.testing.expectEqual(@as(u16, 3), rr.rdlength);
@@ -291,6 +356,7 @@ fn parse_name(full_msg_bytes: []const u8, input_offset: u32, output: []u8) parse
     }
 
     // Add ending null char, remove last '.' char
+    // TODO: Should we keep the ending `.` like `dig` command, or remove as in `nslookup`?
     output[o_id] = 0;
     o_id -= 1;
 

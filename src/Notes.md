@@ -40,3 +40,7 @@ https://datatracker.ietf.org/doc/html/rfc1035#section-3.2.1
 https://datatracker.ietf.org/doc/html/rfc1035#section-4.1
 
 All messages contain header
+
+### TCP usage
+
+When using TCP, we have to send size of message as first two octect (we will recieve same format in response)

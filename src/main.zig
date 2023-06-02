@@ -4,7 +4,7 @@ const msg = @import("msg.zig");
 pub fn main() !void {
     // Prints to stderr (it's a shortcut based on `std.io.getStdErr()`)
     std.debug.print("All your {s} are belong to us.\n", .{"codebase"});
-    var mem_buffer: [1000]u8 = undefined;
+    var mem_buffer: [2000]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&mem_buffer);
     const allocator = fba.allocator();
 
@@ -15,7 +15,7 @@ pub fn main() !void {
     }
 
     // Generate message for DNS request
-    const message = msg.message.forDomain(args[1]);
+    const message = msg.message.forDomain(args[1], allocator) catch unreachable;
     std.debug.print("argument: {}\n", .{message});
 
     var buffer: [512]u8 = undefined;
@@ -38,15 +38,25 @@ pub fn main() !void {
     const recv = try conn.read(buf[0..]);
     std.debug.print("len: {d}\t\tsent: {d}\trecv: {d}\n\n", .{ len, sent, recv });
 
-    for (0..recv) |i| {
+    for (2..recv) |i| {
         std.debug.print("{x:0>2} ", .{buf[i]});
     }
     std.debug.print("\n\n", .{});
 
-    var resp_h: msg.header = msg.header{};
+    var resp_message: msg.message = undefined;
     const resp_content = buf[2..recv];
-    resp_h.fromBytes(resp_content[0..]);
-    std.debug.print("response header: {}, flags: {b:0>16}\n", .{ resp_h, resp_h.flags });
+    const read_count = resp_message.fromBytes(resp_content[0..], allocator) catch unreachable;
+    std.debug.print("read count: {d}\n", .{read_count});
+
+    std.debug.print("Response header    : {any}\n", .{resp_message.header});
+    if (resp_message.header.qdcount > 0)
+        std.debug.print("Response question  : {any}\n", .{resp_message.question});
+    if (resp_message.header.ancount > 0)
+        std.debug.print("Response answers   : {any}\n", .{resp_message.answers});
+    if (resp_message.header.nscount > 0)
+        std.debug.print("Response authority : {any}\n", .{resp_message.authority});
+    if (resp_message.header.arcount > 0)
+        std.debug.print("Response addl      : {any}\n", .{resp_message.additional});
 
     // stdout is for the actual output of your application, for example if you
     // are implementing gzip, then only the compressed bytes should be sent to
