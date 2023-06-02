@@ -237,8 +237,9 @@ pub const rr_type = enum(u16) {
     TXT,
 };
 
-pub const rdata = union {
+pub const rdata = union(enum) {
     raw: []const u8,
+    str: []const u8,
     ipv4: std.net.Ip4Address,
 };
 
@@ -277,6 +278,11 @@ pub const resource_record = struct {
                         0,
                     ),
                 };
+            },
+            .CNAME => {
+                var cname = try allocator.allocSentinel(u8, 256, 0);
+                var out = parse_name(full_msg_bytes[0..], offset, cname);
+                self.rdata = rdata{ .str = cname[0..(out.output_written)] };
             },
             else => {
                 self.rdata = rdata{ .raw = full_msg_bytes[offset..(offset + self.rdlength)] };
