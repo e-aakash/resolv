@@ -141,6 +141,7 @@ pub const question = struct {
     ) !void {
         if (fmt.len != 0) std.fmt.invalidFmtError(fmt, self);
         _ = options;
+        // TODO: Handle cases when qtype ins't included in rr_type
         try std.fmt.format(out_stream, "{s}\t\t{d}\t{s}\n", .{ self.qname, self.qclass, @tagName(@intToEnum(rr_type, self.qtype)) });
     }
 };
@@ -297,7 +298,7 @@ pub const rr_type = enum(u16) {
     TXT,
 };
 
-pub const rdata = union(enum) {
+const rdata = union(enum) {
     raw: []const u8,
     str: []const u8,
     ipv4: std.net.Ip4Address,
@@ -474,10 +475,11 @@ fn parse_name(full_msg_bytes: []const u8, input_offset: u32, output: []u8) parse
         o_id += 1;
     }
 
-    // Add ending null char, remove last '.' char
-    // TODO: Should we keep the ending `.` like `dig` command, or remove as in `nslookup`?
-    output[o_id] = 0;
-    o_id -= 1;
+    // Handle case of emtpy name
+    if (o_id == 0) {
+        output[o_id] = '.';
+        o_id += 1;
+    }
 
     return parse_name_out{ .offset = offset_increase, .output_written = o_id };
 }
@@ -505,6 +507,8 @@ test "parse_name compression" {
     try std.testing.expectEqualStrings("eaa.abc.de", output[0..(out.output_written)]);
 }
 
+// UTILITY Functions
+
 fn slice_to_int(comptime T: type, slice: []const u8, input_offset: *u32) T {
     const it: u8 = @typeInfo(T).Int.bits / 8;
     var value: T = slice[input_offset.*];
@@ -516,8 +520,6 @@ fn slice_to_int(comptime T: type, slice: []const u8, input_offset: *u32) T {
 
     return value;
 }
-
-// UTILITY Functions
 
 pub fn print_slice(buf: []const u8) void {
     for (0..(buf.len)) |i| {
