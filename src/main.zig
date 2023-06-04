@@ -40,7 +40,7 @@ pub fn main() !void {
     // msg.print_slice(resp_content);
     // std.debug.print("\n", .{});
 
-    const read_count = resp_message.fromBytes(resp_content[0..], allocator) catch unreachable;
+    const read_count = try resp_message.fromBytes(resp_content[0..], allocator);
     _ = read_count;
 
     // Send output to stdio
@@ -51,39 +51,7 @@ pub fn main() !void {
     var bw = std.io.bufferedWriter(stdout_file);
     const stdout = bw.writer();
 
-    // TODO: Move print logic to respective structs?
-    try stdout.print("Response header\n{any}\n", .{resp_message.header});
-    if (resp_message.header.qdcount > 0)
-        try stdout.print("\nResponse question\n{any}\n", .{resp_message.question});
-    if (resp_message.header.ancount > 0) {
-        try stdout.print("\nAnswer\n", .{});
-        for (0..resp_message.header.ancount) |i| {
-            const ans = resp_message.answers[i];
-            try stdout.print("{s}\t{d}\t{d}\t{s}\t", .{
-                ans.name,
-                ans.ttl,
-                ans.class,
-                @tagName(ans.type),
-            });
-            switch (ans.rdata) {
-                .raw => |val| {
-                    try stdout.print("{any}", .{val});
-                },
-                .str => |val| {
-                    try stdout.print("{s}", .{val});
-                },
-                .ipv4 => |ipv4| {
-                    try ipv4.format("", undefined, stdout);
-                },
-            }
-            try stdout.print("\n", .{});
-        }
-    }
-    if (resp_message.header.nscount > 0)
-        try stdout.print("\nResponse authority\n {any}\n", .{resp_message.authority});
-    if (resp_message.header.arcount > 0)
-        try stdout.print("\nResponse additional\n{any}\n", .{resp_message.additional});
-
+    try stdout.print("{any}\n", .{resp_message});
     try bw.flush(); // don't forget to flush!
 }
 

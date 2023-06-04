@@ -44,6 +44,17 @@ pub const header = struct {
         i += 2;
         return i;
     }
+
+    pub fn format(
+        self: header,
+        comptime fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        out_stream: anytype,
+    ) !void {
+        if (fmt.len != 0) std.fmt.invalidFmtError(fmt, self);
+        _ = options;
+        try std.fmt.format(out_stream, "id={d} flags={d} q={d} an={d} ns={d} ar={d}\n", .{ self.id, self.flags, self.qdcount, self.ancount, self.nscount, self.arcount });
+    }
 };
 
 test "header from bytes" {
@@ -120,6 +131,17 @@ pub const question = struct {
         index += 1;
 
         return index;
+    }
+
+    pub fn format(
+        self: question,
+        comptime fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        out_stream: anytype,
+    ) !void {
+        if (fmt.len != 0) std.fmt.invalidFmtError(fmt, self);
+        _ = options;
+        try std.fmt.format(out_stream, "{s}\t\t{d}\t{s}\n", .{ self.qname, self.qclass, @tagName(@intToEnum(rr_type, self.qtype)) });
     }
 };
 
@@ -223,6 +245,44 @@ pub const message = struct {
 
         return offset;
     }
+
+    pub fn format(
+        self: message,
+        comptime fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        out_stream: anytype,
+    ) !void {
+        // if (fmt.len != 0) std.fmt.invalidFmtError(fmt, self);
+
+        try self.header.format(fmt, options, out_stream);
+        if (self.header.qdcount > 0) {
+            try std.fmt.format(out_stream, "\nQuery\n", .{});
+            for (0..(self.header.qdcount)) |i| {
+                try self.question[i].format(fmt, options, out_stream);
+            }
+        }
+        if (self.header.ancount > 0) {
+            try std.fmt.format(out_stream, "\nAnswer\n", .{});
+            for (0..self.header.ancount) |i| {
+                const ans = self.answers[i];
+                try ans.format(fmt, options, out_stream);
+            }
+        }
+        if (self.header.nscount > 0) {
+            try std.fmt.format(out_stream, "\nAuthority\n", .{});
+            for (0..self.header.nscount) |i| {
+                const ans = self.authority[i];
+                try ans.format(fmt, options, out_stream);
+            }
+        }
+        if (self.header.arcount > 0) {
+            try std.fmt.format(out_stream, "\nAdditional\n", .{});
+            for (0..self.header.arcount) |i| {
+                const ans = self.additional[i];
+                try ans.format(fmt, options, out_stream);
+            }
+        }
+    }
 };
 
 // TODO: Add basic tests for message
@@ -241,7 +301,10 @@ pub const rdata = union(enum) {
     raw: []const u8,
     str: []const u8,
     ipv4: std.net.Ip4Address,
+    soa: soa_rdata,
 };
+
+const soa_rdata = struct { mname: []u8 = "", rname: []u8 = "", serial: u32 = 0, refresh: u32 = 0, retry: u32 = 0, expire: u32 = 0, minimum: u32 = 0 };
 
 pub const resource_record = struct {
     name: []u8 = "",
@@ -268,8 +331,6 @@ pub const resource_record = struct {
         self.ttl = slice_to_int(u32, full_msg_bytes[0..], &offset);
         self.rdlength = slice_to_int(u16, full_msg_bytes[0..], &offset);
 
-        self.rdata = rdata{ .raw = full_msg_bytes[offset..(offset + self.rdlength)] };
-
         switch (self.type) {
             .A => {
                 self.rdata = rdata{
@@ -284,6 +345,26 @@ pub const resource_record = struct {
                 var out = parse_name(full_msg_bytes[0..], offset, cname);
                 self.rdata = rdata{ .str = cname[0..(out.output_written)] };
             },
+            .SOA => {
+                var soa: soa_rdata = soa_rdata{};
+                var n = try allocator.allocSentinel(u8, 256, 0);
+                var out = parse_name(full_msg_bytes, offset, n);
+                soa.rname = n[0..(out.output_written)];
+                offset += out.offset;
+
+                var m = try allocator.allocSentinel(u8, 256, 0);
+                out = parse_name(full_msg_bytes, offset, m);
+                soa.mname = m[0..(out.output_written)];
+                offset += out.offset;
+
+                soa.serial = slice_to_int(u32, full_msg_bytes, &offset);
+                soa.refresh = slice_to_int(u32, full_msg_bytes, &offset);
+                soa.retry = slice_to_int(u32, full_msg_bytes, &offset);
+                soa.expire = slice_to_int(u32, full_msg_bytes, &offset);
+                soa.minimum = slice_to_int(u32, full_msg_bytes, &offset);
+
+                self.rdata = rdata{ .soa = soa };
+            },
             else => {
                 self.rdata = rdata{ .raw = full_msg_bytes[offset..(offset + self.rdlength)] };
             },
@@ -293,6 +374,38 @@ pub const resource_record = struct {
 
         // Return only the change in offset, not the absolute offset
         return offset - input_offset;
+    }
+
+    // insipred from net.<type>.format function for writing to stream
+    pub fn format(
+        self: resource_record,
+        comptime fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        out_stream: anytype,
+    ) !void {
+        if (fmt.len != 0) std.fmt.invalidFmtError(fmt, self);
+        _ = options;
+        try std.fmt.format(out_stream, "{s}\t{d}\t{d}\t{s}\t", .{
+            self.name,
+            self.ttl,
+            self.class,
+            @tagName(self.type),
+        });
+        switch (self.rdata) {
+            .raw => |val| {
+                try std.fmt.format(out_stream, "{any}", .{val});
+            },
+            .str => |val| {
+                try std.fmt.format(out_stream, "{s}", .{val});
+            },
+            .ipv4 => |ipv4| {
+                try ipv4.format("", undefined, out_stream);
+            },
+            .soa => |soa| {
+                try std.fmt.format(out_stream, "{s} {s} {d} {d} {d} {d} {d}", .{ soa.rname, soa.mname, soa.serial, soa.refresh, soa.retry, soa.expire, soa.minimum });
+            },
+        }
+        try std.fmt.format(out_stream, "\n", .{});
     }
 };
 
