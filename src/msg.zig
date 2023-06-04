@@ -193,7 +193,7 @@ pub const message = struct {
         offset += h.fromBytes(msg[0..]);
         self.header = h;
 
-        if (self.header.ancount != 0) {
+        if (self.header.qdcount != 0) {
             self.question = try allocator.alloc(question, self.header.qdcount);
             for (0..(h.qdcount)) |i| {
                 offset += try self.question[i].fromBytes(msg[offset..], allocator);
@@ -210,14 +210,14 @@ pub const message = struct {
         if (self.header.nscount != 0) {
             self.authority = try allocator.alloc(resource_record, self.header.nscount);
             for (0..(h.nscount)) |i| {
-                offset += try self.answers[i].fromBytes(msg, offset, allocator);
+                offset += try self.authority[i].fromBytes(msg, offset, allocator);
             }
         }
 
         if (self.header.arcount != 0) {
-            self.answers = try allocator.alloc(resource_record, self.header.arcount);
+            self.additional = try allocator.alloc(resource_record, self.header.arcount);
             for (0..(h.arcount)) |i| {
-                offset += try self.answers[i].fromBytes(msg, offset, allocator);
+                offset += try self.additional[i].fromBytes(msg, offset, allocator);
             }
         }
 
@@ -297,7 +297,7 @@ pub const resource_record = struct {
 };
 
 test "rr from bytes" {
-    const msg_bytes = [_]u8{ 3, 'a', 'b', 'c', 2, 'd', 'e', 0, 0, 1, 1, 1, 0, 0, 0, 2, 0, 3, 0, 0, 0 };
+    const msg_bytes = [_]u8{ 3, 'a', 'b', 'c', 2, 'd', 'e', 0, 0, 1, 1, 1, 0, 0, 0, 2, 0, 3, 0, 0, 0, 0 };
     var output = [_]u8{0} ** 10;
     _ = output;
     var mem_buffer: [1000]u8 = undefined;
@@ -402,4 +402,13 @@ fn slice_to_int(comptime T: type, slice: []const u8, input_offset: *u32) T {
     }
 
     return value;
+}
+
+// UTILITY Functions
+
+pub fn print_slice(buf: []const u8) void {
+    for (0..(buf.len)) |i| {
+        std.debug.print("{x:0>2} ", .{buf[i]});
+    }
+    std.debug.print("\n", .{});
 }

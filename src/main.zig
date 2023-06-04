@@ -4,7 +4,7 @@ const msg = @import("msg.zig");
 pub fn main() !void {
     // Prints to stderr (it's a shortcut based on `std.io.getStdErr()`)
     std.debug.print("All your {s} are belong to us.\n", .{"codebase"});
-    var mem_buffer: [2000]u8 = undefined;
+    var mem_buffer: [8000]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&mem_buffer);
     const allocator = fba.allocator();
 
@@ -14,6 +14,8 @@ pub fn main() !void {
         printUsageAndExit(args);
     }
 
+    // TODO: Parse arguments to take options also, like which ns to use, etc
+
     // Generate message for DNS request
     const message = msg.message.forDomain(args[1], allocator) catch unreachable;
 
@@ -21,7 +23,7 @@ pub fn main() !void {
     const len = message.toBytesTCP(buffer[0..]);
 
     // USE TCP, no UDP yet in zig :(
-    const address = std.net.Address.initIp4([4]u8{ 127, 0, 0, 53 }, 53);
+    const address = std.net.Address.initIp4([4]u8{ 8, 8, 8, 8 }, 53);
     const conn = try std.net.tcpConnectToAddress(address);
     defer conn.close();
 
@@ -29,10 +31,15 @@ pub fn main() !void {
     _ = sent;
 
     var buf: [1024]u8 = undefined;
-    const recv = try conn.read(buf[0..]);
+    const recv = @truncate(u32, try conn.read(buf[0..]));
 
     var resp_message: msg.message = undefined;
     const resp_content = buf[2..recv];
+
+    // std.debug.print("Full resp:\n", .{});
+    // msg.print_slice(resp_content);
+    // std.debug.print("\n", .{});
+
     const read_count = resp_message.fromBytes(resp_content[0..], allocator) catch unreachable;
     _ = read_count;
 
@@ -44,11 +51,12 @@ pub fn main() !void {
     var bw = std.io.bufferedWriter(stdout_file);
     const stdout = bw.writer();
 
-    // std.debug.print("Response header    : {any}\n", .{resp_message.header});
-    // if (resp_message.header.qdcount > 0)
-    // std.debug.print("Response question  : {any}\n", .{resp_message.question});
+    // TODO: Move print logic to respective structs?
+    try stdout.print("Response header\n{any}\n", .{resp_message.header});
+    if (resp_message.header.qdcount > 0)
+        try stdout.print("\nResponse question\n{any}\n", .{resp_message.question});
     if (resp_message.header.ancount > 0) {
-        std.debug.print("Answer: \n", .{});
+        try stdout.print("\nAnswer\n", .{});
         for (0..resp_message.header.ancount) |i| {
             const ans = resp_message.answers[i];
             try stdout.print("{s}\t{d}\t{d}\t{s}\t", .{
@@ -71,10 +79,10 @@ pub fn main() !void {
             try stdout.print("\n", .{});
         }
     }
-    // if (resp_message.header.nscount > 0)
-    //     std.debug.print("Response authority : {any}\n", .{resp_message.authority});
-    // if (resp_message.header.arcount > 0)
-    //     std.debug.print("Response addl      : {any}\n", .{resp_message.additional});
+    if (resp_message.header.nscount > 0)
+        try stdout.print("\nResponse authority\n {any}\n", .{resp_message.authority});
+    if (resp_message.header.arcount > 0)
+        try stdout.print("\nResponse additional\n{any}\n", .{resp_message.additional});
 
     try bw.flush(); // don't forget to flush!
 }
