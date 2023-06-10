@@ -221,7 +221,15 @@ pub const question = struct {
         if (fmt.len != 0) std.fmt.invalidFmtError(fmt, self);
         _ = options;
         // TODO: Handle cases when qtype ins't included in rr_type
-        try std.fmt.format(out_stream, "{s}\t\t{d}\t{s}\n", .{ self.qname, self.qclass, @tagName(@intToEnum(rr_type, self.qtype)) });
+        try std.fmt.format(
+            out_stream,
+            "{s}\t\t{s}\t{s}\n",
+            .{
+                self.qname,
+                @tagName(@intToEnum(q_class, self.qclass)),
+                @tagName(@intToEnum(rr_type, self.qtype)),
+            },
+        );
     }
 };
 
@@ -373,7 +381,7 @@ pub const message = struct {
 
 // TODO: Add basic tests for message
 
-pub const rr_type = enum(u16) {
+const rr_type = enum(u16) {
     A = 1,
     NS,
     CNAME = 5,
@@ -383,6 +391,14 @@ pub const rr_type = enum(u16) {
     TXT,
 };
 
+const q_class = enum(u16) {
+    IN = 1,
+    CS,
+    CH,
+    HS,
+    ANY = 255,
+};
+
 const rdata = union(enum) {
     raw: []const u8,
     str: []const u8,
@@ -390,19 +406,32 @@ const rdata = union(enum) {
     soa: soa_rdata,
 };
 
-const soa_rdata = struct { mname: []u8 = "", rname: []u8 = "", serial: u32 = 0, refresh: u32 = 0, retry: u32 = 0, expire: u32 = 0, minimum: u32 = 0 };
+const soa_rdata = struct {
+    mname: []u8 = "",
+    rname: []u8 = "",
+    serial: u32 = 0,
+    refresh: u32 = 0,
+    retry: u32 = 0,
+    expire: u32 = 0,
+    minimum: u32 = 0,
+};
 
 pub const resource_record = struct {
     name: []u8 = "",
     type: rr_type = rr_type.A,
-    class: u16 = 0,
+    class: q_class = q_class.IN,
     ttl: u32 = 0,
     rdlength: u16 = 0,
     rdata: rdata = rdata{ .raw = "" },
 
     // RR can have message compression, so we will need to pass full input buffer
     // Needs allocator?
-    pub fn fromBytes(self: *resource_record, full_msg_bytes: []const u8, input_offset: u32, allocator: std.mem.Allocator) !u32 {
+    pub fn fromBytes(
+        self: *resource_record,
+        full_msg_bytes: []const u8,
+        input_offset: u32,
+        allocator: std.mem.Allocator,
+    ) !u32 {
         // Domain name cannot be more than 255 octets
         var name = try allocator.alloc(u8, 256);
         var offset = input_offset;
@@ -412,8 +441,12 @@ pub const resource_record = struct {
 
         offset += name_out.offset;
 
-        self.type = @intToEnum(rr_type, slice_to_int(u16, full_msg_bytes[0..], &offset));
-        self.class = slice_to_int(u16, full_msg_bytes[0..], &offset);
+        self.type = @intToEnum(rr_type, slice_to_int(
+            u16,
+            full_msg_bytes[0..],
+            &offset,
+        ));
+        self.class = @intToEnum(q_class, slice_to_int(u16, full_msg_bytes[0..], &offset));
         self.ttl = slice_to_int(u32, full_msg_bytes[0..], &offset);
         self.rdlength = slice_to_int(u16, full_msg_bytes[0..], &offset);
 
@@ -421,7 +454,12 @@ pub const resource_record = struct {
             .A => {
                 self.rdata = rdata{
                     .ipv4 = std.net.Ip4Address.init(
-                        [4]u8{ full_msg_bytes[offset + 0], full_msg_bytes[offset + 1], full_msg_bytes[offset + 2], full_msg_bytes[offset + 3] },
+                        [4]u8{
+                            full_msg_bytes[offset + 0],
+                            full_msg_bytes[offset + 1],
+                            full_msg_bytes[offset + 2],
+                            full_msg_bytes[offset + 3],
+                        },
                         0,
                     ),
                 };
@@ -443,11 +481,16 @@ pub const resource_record = struct {
                 soa.mname = m[0..(out.output_written)];
                 offset += out.offset;
 
-                soa.serial = slice_to_int(u32, full_msg_bytes, &offset);
-                soa.refresh = slice_to_int(u32, full_msg_bytes, &offset);
-                soa.retry = slice_to_int(u32, full_msg_bytes, &offset);
-                soa.expire = slice_to_int(u32, full_msg_bytes, &offset);
-                soa.minimum = slice_to_int(u32, full_msg_bytes, &offset);
+                const fields = @typeInfo(soa_rdata).Struct.fields;
+
+                inline for (fields) |field| {
+                    if (field.type == u32)
+                        @field(soa, field.name) = slice_to_int(
+                            u32,
+                            full_msg_bytes,
+                            &offset,
+                        );
+                }
 
                 self.rdata = rdata{ .soa = soa };
             },
@@ -471,10 +514,10 @@ pub const resource_record = struct {
     ) !void {
         if (fmt.len != 0) std.fmt.invalidFmtError(fmt, self);
         _ = options;
-        try std.fmt.format(out_stream, "{s}\t{d}\t{d}\t{s}\t", .{
+        try std.fmt.format(out_stream, "{s}\t{d}\t{s}\t{s}\t", .{
             self.name,
             self.ttl,
-            self.class,
+            @tagName(self.class),
             @tagName(self.type),
         });
         switch (self.rdata) {
@@ -488,7 +531,10 @@ pub const resource_record = struct {
                 try ipv4.format("", undefined, out_stream);
             },
             .soa => |soa| {
-                try std.fmt.format(out_stream, "{s} {s} {d} {d} {d} {d} {d}", .{ soa.rname, soa.mname, soa.serial, soa.refresh, soa.retry, soa.expire, soa.minimum });
+                inline for (@typeInfo(soa_rdata).Struct.fields) |field| {
+                    comptime var format_str = if (field.type == u32) "{d} " else "{s} ";
+                    try std.fmt.format(out_stream, format_str, .{@field(soa, field.name)});
+                }
             },
         }
         try std.fmt.format(out_stream, "\n", .{});
@@ -496,7 +542,7 @@ pub const resource_record = struct {
 };
 
 test "rr from bytes" {
-    const msg_bytes = [_]u8{ 3, 'a', 'b', 'c', 2, 'd', 'e', 0, 0, 1, 1, 1, 0, 0, 0, 2, 0, 3, 0, 0, 0, 0 };
+    const msg_bytes = [_]u8{ 3, 'a', 'b', 'c', 2, 'd', 'e', 0, 0, 1, 0, 255, 0, 0, 0, 2, 0, 3, 0, 0, 0, 0 };
     var output = [_]u8{0} ** 10;
     _ = output;
     var mem_buffer: [1000]u8 = undefined;
@@ -508,7 +554,7 @@ test "rr from bytes" {
 
     try std.testing.expectEqual(@as(u32, 21), out catch unreachable);
     try std.testing.expectEqual(rr_type.A, rr.type);
-    try std.testing.expectEqual(@as(u16, 257), rr.class);
+    try std.testing.expectEqual(q_class.ANY, rr.class);
     try std.testing.expectEqual(@as(u32, 2), rr.ttl);
     try std.testing.expectEqual(@as(u16, 3), rr.rdlength);
 }
