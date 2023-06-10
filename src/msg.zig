@@ -1,9 +1,64 @@
-// Components of the flag section, which we don't need/use
-// pub const qr = enum(bool) { query, response };
-// pub const opcode = enum(u4) { query, iquery, status };
-// pub const rcode = enum(u4) { no_error, format, server, name, not_implemented, refused };
-
 const std = @import("std");
+
+const opcode = enum(u4) { query, iquery, status };
+const rcode = enum(u4) { no_error, format, server_fail, name, not_implemented, refused };
+
+const flag_struct = struct {
+    qr: bool = false,
+    opcode: opcode = opcode.query,
+    aa: bool = false,
+    tc: bool = false,
+    rd: bool = true,
+    ra: bool = false,
+    rcode: rcode = rcode.no_error, // Currently not implementing Z (u3)
+
+    pub fn fromValue(f: *flag_struct, value: u16) void {
+        f.qr = isSet(value, 15);
+
+        const op = (value & (0b1111 << 11)) >> 11;
+        f.opcode = @intToEnum(opcode, op);
+
+        f.aa = isSet(value, 10);
+        f.tc = isSet(value, 9);
+        f.rd = isSet(value, 8);
+        f.ra = isSet(value, 7);
+
+        const rc = (value & 0b1111);
+        f.rcode = @intToEnum(rcode, rc);
+    }
+
+    pub fn toValue(f: *const flag_struct) u16 {
+        const qr_val: u8 = if (f.qr) (@as(u8, 1) << 7) else 0;
+        const op_val: u8 = @enumToInt(f.opcode);
+        const aa_val: u8 = if (f.aa) (@as(u8, 1) << 2) else 0;
+        const tc_val: u8 = if (f.tc) (@as(u8, 1) << 1) else 0;
+        const rd_val: u8 = if (f.rd) 1 else 0;
+
+        const ra_val: u8 = if (f.ra) (@as(u8, 1) << 7) else 0;
+        const rc_val: u8 = @enumToInt(f.rcode);
+
+        var output: u16 = qr_val + op_val + aa_val + tc_val + rd_val;
+        output = @truncate(u16, output << 8);
+        return output + (ra_val + rc_val);
+    }
+
+    fn isSet(value: u16, index: u4) bool {
+        const mask: u16 = @as(u16, 1) << index;
+        return (mask & value) == mask;
+    }
+};
+
+test "flag_struct from value" {
+    const flag: flag_struct = flag_struct{ .qr = true, .aa = true, .tc = true, .ra = true, .rcode = rcode.name };
+    var out_flag = flag_struct{};
+    out_flag.fromValue(34691);
+    try std.testing.expectEqualDeep(flag, out_flag);
+}
+
+test "flag_struct to value" {
+    const flag: flag_struct = flag_struct{ .qr = true, .aa = true, .tc = true, .ra = true, .rcode = rcode.name };
+    try std.testing.expectEqual(@as(u16, 34691), flag.toValue());
+}
 
 pub const header = struct {
     id: u16 = 0,
@@ -14,13 +69,13 @@ pub const header = struct {
     arcount: u16 = 0,
 
     pub fn fromBytes(h: *header, buf: []const u8) u32 {
-        // TODO: Use readIntForeign to remove bit manipulation?
-        h.id = (@as(u16, buf[0]) << 8) + buf[1];
-        h.flags = (@as(u16, buf[2]) << 8) + buf[3];
-        h.qdcount = (@as(u16, buf[4]) << 8) + buf[5];
-        h.ancount = (@as(u16, buf[6]) << 8) + buf[7];
-        h.nscount = (@as(u16, buf[8]) << 8) + buf[9];
-        h.arcount = (@as(u16, buf[10]) << 8) + buf[11];
+        comptime var i = 0;
+        const fields = @typeInfo(header).Struct.fields;
+
+        inline for (fields) |field| {
+            @field(h, field.name) = std.mem.readIntForeign(u16, buf[i..(i + 2)]);
+            i += 2;
+        }
 
         return 12;
     }
@@ -29,19 +84,11 @@ pub const header = struct {
         std.debug.assert(output.len >= 12);
         comptime var i: u32 = 0;
 
-        // TODO: use comptime to cleanup this?
-        std.mem.writeIntForeign(u16, output[i..(i + 2)], self.id);
-        i += 2;
-        std.mem.writeIntForeign(u16, output[i..(i + 2)], self.flags);
-        i += 2;
-        std.mem.writeIntForeign(u16, output[i..(i + 2)], self.qdcount);
-        i += 2;
-        std.mem.writeIntForeign(u16, output[i..(i + 2)], self.ancount);
-        i += 2;
-        std.mem.writeIntForeign(u16, output[i..(i + 2)], self.nscount);
-        i += 2;
-        std.mem.writeIntForeign(u16, output[i..(i + 2)], self.arcount);
-        i += 2;
+        const fields = @typeInfo(header).Struct.fields;
+        inline for (fields) |field| {
+            std.mem.writeIntForeign(u16, output[i..(i + 2)], @field(self, field.name));
+            i += 2;
+        }
         return i;
     }
 
@@ -53,17 +100,48 @@ pub const header = struct {
     ) !void {
         if (fmt.len != 0) std.fmt.invalidFmtError(fmt, self);
         _ = options;
-        try std.fmt.format(out_stream, "id={d} flags={d} q={d} an={d} ns={d} ar={d}\n", .{ self.id, self.flags, self.qdcount, self.ancount, self.nscount, self.arcount });
+
+        var flags = flag_struct{};
+        flags.fromValue(self.flags);
+
+        try std.fmt.format(
+            out_stream,
+            "; ->>HEADER<<- opcode: {s}, status: {s}, id: {d}\n",
+            .{ @tagName(flags.opcode), @tagName(flags.rcode), self.id },
+        );
+
+        try std.fmt.format(out_stream, "; flags:", .{});
+        const fields = @typeInfo(flag_struct).Struct.fields;
+        inline for (fields) |field| {
+            if (field.type == bool) {
+                if (@field(flags, field.name)) {
+                    try std.fmt.format(out_stream, " {s}", .{field.name});
+                }
+            }
+        }
+
+        try std.fmt.format(
+            out_stream,
+            "; QUERY: {d}, ANSWER: {d}, AUTHORITY: {d}, ADDITIONAL: {d}\n",
+            .{ self.qdcount, self.ancount, self.nscount, self.arcount },
+        );
     }
 };
 
 test "header from bytes" {
     var bytes = [_]u8{ 0, 1, 0, 0, 0, 1, 0, 1, 0, 1, 1, 1 };
+    var flag = flag_struct{};
+    flag.fromValue(0);
+    var out_flag = flag_struct{};
     var h = header{ .id = 0, .flags = 0, .qdcount = 0, .ancount = 0, .nscount = 0, .arcount = 0 };
 
     _ = h.fromBytes(bytes[0..]);
     try std.testing.expectEqual(@as(u16, 1), h.id);
     try std.testing.expectEqual(@as(u16, 0), h.flags);
+
+    out_flag.fromValue(h.flags);
+    try std.testing.expectEqualDeep(flag, out_flag);
+
     try std.testing.expectEqual(@as(u16, 1), h.qdcount);
     try std.testing.expectEqual(@as(u16, 1), h.ancount);
     try std.testing.expectEqual(@as(u16, 1), h.nscount);
@@ -189,7 +267,8 @@ pub const message = struct {
     additional: []resource_record = &[_]resource_record{},
 
     pub fn forDomain(domain: []u8, allocator: std.mem.Allocator) !message {
-        const h = header{ .id = 1, .flags = 1 << 8, .qdcount = 1 };
+        const flags = flag_struct{ .rd = true };
+        const h = header{ .id = 1, .flags = flags.toValue(), .qdcount = 1 };
         const q = question{ .qname = domain, .qtype = 1, .qclass = 1 };
 
         var qs = try allocator.alloc(question, 1);
@@ -261,8 +340,6 @@ pub const message = struct {
         options: std.fmt.FormatOptions,
         out_stream: anytype,
     ) !void {
-        // if (fmt.len != 0) std.fmt.invalidFmtError(fmt, self);
-
         try self.header.format(fmt, options, out_stream);
         if (self.header.qdcount > 0) {
             try std.fmt.format(out_stream, "\nQuery\n", .{});
