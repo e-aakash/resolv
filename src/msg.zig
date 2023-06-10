@@ -111,6 +111,7 @@ pub const question = struct {
 
         var index: u32 = 0;
         while (parts.next()) |part| {
+            if (part.len == 0) break;
             output[index] = @truncate(u8, part.len);
             index += 1;
             for (part) |char| {
@@ -157,7 +158,7 @@ test "question from bytes" {
     var out = q.fromBytes(input[0..], allocator);
 
     try std.testing.expectEqual(@as(u32, 12), out catch unreachable);
-    try std.testing.expectEqualStrings("eaa.xy", q.qname);
+    try std.testing.expectEqualStrings("eaa.xy.", q.qname);
     try std.testing.expectEqual(@as(u32, 1), q.qtype);
     try std.testing.expectEqual(@as(u32, 257), q.qclass);
 }
@@ -165,11 +166,18 @@ test "question from bytes" {
 test "question to bytes" {
     var b = [_]u8{0} ** 10;
     var name = [_]u8{ 'a', 'b', '.', 'd' };
-
     const q = question{ .qname = &name, .qtype = 0, .qclass = 259 };
 
     try std.testing.expectEqual(@as(u32, 10), q.toBytes(b[0..]));
+    try std.testing.expectEqual(b, [_]u8{ 2, 'a', 'b', 1, 'd', 0, 0, 0, 1, 3 });
+}
 
+test "question to bytes for trailing ." {
+    var b = [_]u8{0} ** 10;
+    var name = [_]u8{ 'a', 'b', '.', 'd', '.' };
+    const q = question{ .qname = &name, .qtype = 0, .qclass = 259 };
+
+    try std.testing.expectEqual(@as(u32, 10), q.toBytes(b[0..]));
     try std.testing.expectEqual(b, [_]u8{ 2, 'a', 'b', 1, 'd', 0, 0, 0, 1, 3 });
 }
 
@@ -491,8 +499,8 @@ test "parse_name no compression" {
     const out = parse_name(msg_bytes[0..], 0, output[0..]);
 
     try std.testing.expectEqual(@as(u32, 8), out.offset);
-    try std.testing.expectEqual(@as(u32, 6), out.output_written);
-    try std.testing.expectEqualStrings("abc.de", output[0..(out.output_written)]);
+    try std.testing.expectEqual(@as(u32, 7), out.output_written);
+    try std.testing.expectEqualStrings("abc.de.", output[0..(out.output_written)]);
 }
 
 test "parse_name compression" {
@@ -503,8 +511,8 @@ test "parse_name compression" {
     const out = parse_name(msg_bytes[0..], offset, output[0..]);
 
     try std.testing.expectEqual(@as(u32, 6), out.offset);
-    try std.testing.expectEqual(@as(u32, 10), out.output_written);
-    try std.testing.expectEqualStrings("eaa.abc.de", output[0..(out.output_written)]);
+    try std.testing.expectEqual(@as(u32, 11), out.output_written);
+    try std.testing.expectEqualStrings("eaa.abc.de.", output[0..(out.output_written)]);
 }
 
 // UTILITY Functions
