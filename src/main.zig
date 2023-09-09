@@ -10,11 +10,25 @@ pub fn main() !void {
 
     const args = try std.process.argsAlloc(allocator);
 
-    if (args.len != 2) {
+    if (args.len < 2) {
         printUsageAndExit(args);
     }
 
+    // Server address
+    var address = std.net.Address.initIp4([4]u8{ 8, 8, 8, 8 }, 53);
+    var foundServer = false;
+
     // TODO: Parse arguments to take options also, like which ns to use, etc
+    for (args, 0..) |value, i| {
+        _ = i;
+        // Use the first argument with @ as DNS server (similar to `dig`)
+        if (!foundServer and std.mem.startsWith(u8, value, "@")) {
+            const server = value[1..];
+            address = try std.net.Address.parseIp4(server, 53);
+            std.debug.print("Using server: {}\n", .{address});
+            foundServer = true;
+        }
+    }
 
     // Generate message for DNS request
     const message = msg.message.forDomain(args[1], allocator) catch unreachable;
@@ -22,8 +36,7 @@ pub fn main() !void {
     var buffer: [512]u8 = undefined;
     const len = message.toBytesTCP(buffer[0..]);
 
-    // USE TCP, no UDP yet in zig :(
-    const address = std.net.Address.initIp4([4]u8{ 8, 8, 8, 8 }, 53);
+    // USE TCP, no UDP yet in zig (std.net) :(
     const conn = try std.net.tcpConnectToAddress(address);
     defer conn.close();
 
@@ -61,10 +74,5 @@ fn printUsageAndExit(args: [][:0]u8) void {
 }
 
 test "simple test" {
-    var list = std.ArrayList(i32).init(std.testing.allocator);
-    defer list.deinit(); // try commenting this out and see if zig detects the memory leak!
-    try list.append(42);
-    try std.testing.expectEqual(@as(i32, 42), list.pop());
-
     std.testing.refAllDecls(@This());
 }
